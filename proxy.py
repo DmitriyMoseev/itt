@@ -1,7 +1,8 @@
 import cgi
 import re
 import io
-from http.client import HTTPSConnection
+from argparse import ArgumentParser
+from http.client import HTTPSConnection, HTTPConnection
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
 
@@ -24,8 +25,7 @@ class HTMLConverter(HTMLParser):
 
         text = self.get_starttag_text()
         if tag == 'a':
-            text = text.replace('https://habrahabr.ru',
-                                'http://localhost:8000')
+            text = text.replace(settings.target_url, settings.proxy_url)
 
         self.out.write(text)
 
@@ -60,37 +60,63 @@ class HTMLConverter(HTMLParser):
 class HTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-        response = self.request_habr(self.path)
+        response = self.request_target(self.path)
 
         self.send_response(response.status)
         self.send_headers(response.headers)
         self.send_body(response.read(), response.headers['Content-Type'])
 
-    def request_habr(self, path):
-        conn = HTTPSConnection('habrahabr.ru')
+    def request_target(self, path):
+        if settings.target_protocol == 'https':
+            connection_class = HTTPSConnection
+        else:
+            connection_class = HTTPConnection
+        conn = connection_class(settings.target_host)
         conn.request('GET', path)
         return conn.getresponse()
 
     def send_headers(self, headers):
-        propagating_headers = {'Location', 'Content-Type'}
-        for key in propagating_headers:
-            if key in headers:
-                self.send_header(key, headers[key])
+        location = headers['Location']
+        if location:
+            location = location.replace(settings.target_url,
+                                        settings.proxy_url)
+            self.send_header('Location', location)
+
+        content_type = headers['Content-Type']
+        if content_type:
+            self.send_header('Content-Type', content_type)
+
         self.end_headers()
 
     def send_body(self, data, content_type):
         type_, params = cgi.parse_header(content_type)
 
         if type_ == 'text/html':
-            data = HTMLConverter().convert(data, params['charset'])
+            charset = params.get('charset', 'utf-8')
+            data = HTMLConverter().convert(data, charset)
 
         self.wfile.write(data)
 
 
-def run(server_class=HTTPServer):
-    httpd = server_class(('', 8000), HTTPRequestHandler)
-    httpd.serve_forever()
+class Settings:
+    def __init__(self):
+        self.parse_args()
+
+        self.proxy_url = 'http://{0}:{1}'.format(self.host, self.port)
+        self.target_url = '{0}://{1}'.format(self.target_protocol,
+                                             self.target_host)
+
+    def parse_args(self):
+        parser = ArgumentParser()
+        parser.add_argument('--host', default='localhost')
+        parser.add_argument('--port', type=int, default=8000)
+        parser.add_argument('--target-host', default='habrahabr.ru')
+        parser.add_argument('--target-protocol',
+                            default='https', choices=['https', 'http'])
+        return parser.parse_args(namespace=self)
 
 
 if __name__ == '__main__':
-    run()
+    settings = Settings()
+    httpd = HTTPServer((settings.host, settings.port), HTTPRequestHandler)
+    httpd.serve_forever()
